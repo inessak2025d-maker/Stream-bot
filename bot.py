@@ -519,7 +519,7 @@ async def generate_invoices(callback: types.CallbackQuery):
 async def on_startup(bot: Bot):
     for admin_id in NOTIFY_ADMIN_IDS:
         try:
-            await bot.send_message(admin_id, "✅ Бот успішно запущений і готовий до роботи на ОСІННЬОМУ стрімі!")
+            await bot.send_message(admin_id, "✅ Бот успішно запущений і готовий до роботи на ОСІННЬОМУ стрімі! Тест 2")
         except Exception as e:
             print(f"[Помилка] Не вдалося написати адміну {admin_id} про запуск.")
 
