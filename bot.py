@@ -175,7 +175,6 @@ admin_keyboard = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="📊 Сформувати чеки броней", callback_data="get_invoices")]
 ])
 
-# ДОДАНО: Клавіатура для звичайних покупців
 user_keyboard = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="🧾 Мій чек", callback_data="my_invoice")]
 ])
@@ -183,9 +182,8 @@ user_keyboard = InlineKeyboardMarkup(inline_keyboard=[
 @dp.message(CommandStart())
 async def command_start_handler(message: types.Message):
     if message.from_user.id in ADMIN_IDS:
-        await message.answer("Привіт, адміне! Бот готовий до осіннього стріму.", reply_markup=admin_keyboard)
+        await message.answer("Перевірка змін. Привіт, адміне! Бот готовий до стріму.", reply_markup=admin_keyboard)
     else:
-        # ДОДАНО: Привітання для звичайних користувачів
         await message.answer(
             f"Привіт, {message.from_user.first_name}! 👋\n\n"
             "Тут ти можеш перевірити свої поточні броні зі стріму.\n"
@@ -198,45 +196,36 @@ async def handle_group_messages(message: types.Message):
     text = message.text or message.caption or ""
     username = f"@{message.from_user.username}" if message.from_user.username else message.from_user.full_name
 
-    # ПЕРЕВІРКА НА АУКЦІОН (найвищий пріоритет)
+    # ПЕРЕВІРКА НА АУКЦІОН
     if message.from_user.id in ADMIN_IDS and "Стартова ціна" in text:
         print("[ЛОГ] Знайдено шаблон АУКЦІОНУ! Розшифровую...")
-
-        # Шукаємо назву аукціону (текст перед "Стартова ціна")
         lines = text.split('\n')
         auction_name = "Аукціон"
         for i, line in enumerate(lines):
             if "Стартова ціна" in line and i > 0:
-                # Намагаємося взяти попередній непорожній рядок як назву
                 for prev_line in reversed(lines[:i]):
                     if prev_line.strip() and not prev_line.startswith('['):
                         auction_name = f"Аукціон: {prev_line.strip()}"
                         break
                 break
 
-        # Витягуємо стартову ціну просто для запису в базу (реальна ціна буде з коментаря)
         price_match = re.search(r'Стартова ціна\s*[-:]?\s*(\d+)', text, re.IGNORECASE)
         start_price = int(price_match.group(1).strip()) if price_match else 0
-
         photo_id = message.photo[-1].file_id if message.photo else None
 
         cursor.execute('''INSERT INTO merch (photo_id, game, merch_type, character, price, is_auction) VALUES (?, ?, ?, ?, ?, ?)''',
                        (photo_id, "Аукціон", auction_name, "Переможець аукціону", start_price, True))
         merch_id = cursor.lastrowid
-
         cursor.execute('''INSERT OR REPLACE INTO stream_state (chat_id, active_merch_id) VALUES (?, ?)''', (message.chat.id, merch_id))
-
         cursor.execute('''INSERT OR REPLACE INTO chat_log (message_id, user_id, username, text, merch_id) VALUES (?, ?, ?, ?, ?)''',
                        (message.message_id, message.from_user.id, username, text, merch_id))
         conn.commit()
-
         print(f"[ЛОГ] Аукціон №{merch_id} ({auction_name}) успішно додано та активовано!")
         return
 
     # ПЕРЕВІРКА НА ЗВИЧАЙНИЙ ЛОТ
     elif message.from_user.id in ADMIN_IDS and ("Тип:" in text or "Персонаж" in text):
         print("[ЛОГ] Знайдено шаблон лоту! Розшифровую...")
-
         game_match = re.search(r'Гра:\s*(.*?)(?=\s*Тип:|\s*Персонаж[і]?:|\s*Ціна:|$)', text, re.IGNORECASE | re.DOTALL)
         type_match = re.search(r'Тип:\s*(.*?)(?=\s*Персонаж[і]?:|\s*Ціна:|$)', text, re.IGNORECASE | re.DOTALL)
         char_match = re.search(r'Персонаж[і]?:\s*(.*?)(?=\s*Ціна:|$)', text, re.IGNORECASE | re.DOTALL)
@@ -252,18 +241,14 @@ async def handle_group_messages(message: types.Message):
         cursor.execute('''INSERT INTO merch (photo_id, game, merch_type, character, price, is_auction) VALUES (?, ?, ?, ?, ?, ?)''',
                        (photo_id, game, merch_type, character, price, False))
         merch_id = cursor.lastrowid
-
         cursor.execute('''INSERT OR REPLACE INTO stream_state (chat_id, active_merch_id) VALUES (?, ?)''', (message.chat.id, merch_id))
-
         cursor.execute('''INSERT OR REPLACE INTO chat_log (message_id, user_id, username, text, merch_id) VALUES (?, ?, ?, ?, ?)''',
                        (message.message_id, message.from_user.id, username, text, merch_id))
         conn.commit()
-
         print(f"[ЛОГ] Лот №{merch_id} ({character}) успішно додано та активовано!")
         return
 
     target_merch_id = None
-
     if message.reply_to_message:
         cursor.execute("SELECT merch_id FROM chat_log WHERE message_id = ?", (message.reply_to_message.message_id,))
         replied_log = cursor.fetchone()
@@ -281,7 +266,6 @@ async def handle_group_messages(message: types.Message):
 
 @dp.edited_message(F.chat.type.in_({"group", "supergroup"}))
 async def handle_edited_group_messages(message: types.Message):
-    # Якщо людина відредагувала коментар, оновлюємо його в базі даних бота
     text = message.text or message.caption or ""
     cursor.execute("UPDATE chat_log SET text = ? WHERE message_id = ?", (text, message.message_id))
     conn.commit()
@@ -315,12 +299,9 @@ async def catch_reactions(reaction: types.MessageReactionUpdated):
 
             # --- ЛОГІКА ДЛЯ АУКЦІОНУ ---
             if is_auction:
-                # Шукаємо число в коментарі (ставку)
                 bid_match = re.search(r'(\d+)', comment_text)
                 if bid_match:
                     final_price = int(bid_match.group(1))
-
-                    # Для аукціону завжди тільки один переможець на лот. Перевіряємо, чи вже хтось не "виграв" його
                     cursor.execute("SELECT id FROM bookings WHERE merch_id = ?", (merch_id,))
                     if cursor.fetchone():
                         print(f"[ЛОГ] УВАГА: Аукціон №{merch_id} вже завершено. Повторна ставка від {buyer_username} ігнорується.")
@@ -332,13 +313,13 @@ async def catch_reactions(reaction: types.MessageReactionUpdated):
                     print(f"[ЛОГ] ФІКСАЦІЯ АУКЦІОНУ: {buyer_username} виграв '{merch_type}' зі ставкою {final_price} грн")
                 else:
                     print(f"[ЛОГ] УВАГА: Не вдалося знайти ставку в коментарі '{comment_text}' від {buyer_username}.")
-                return # Завершуємо обробку реакції, якщо це аукціон
+                return 
 
             # --- ЛОГІКА ДЛЯ ЗВИЧАЙНОГО ЛОТУ ---
             comment_lower = comment_text.lower()
-            padded_comment = f" {comment_lower.replace(',', ' ').replace('.', ' ')} "
+            # Додаємо заміну дефісів та слешів на пробіли, щоб номери типу 10-11-12 розпізнавалися коректно
+            padded_comment = f" {re.sub(r'[,.\-/]', ' ', comment_lower)} "
 
-            # 1. Глобальний множник (якщо написали "х2", "x3")
             mult_match = re.search(r'(?:х|x)\s*(\d+)', comment_lower)
             global_mult = int(mult_match.group(1)) if mult_match else 1
 
@@ -362,7 +343,6 @@ async def catch_reactions(reaction: types.MessageReactionUpdated):
                     item_qty = int(qty_match.group(1))
                     name_part = name_part[:qty_match.start()].strip()
                     
-                # --- ДОДАНО: Відрізаємо коментарі в дужках [] або () ---
                 name_part = re.sub(r'\[.*?\]|\(.*?\)', '', name_part).strip()
                     
                 parsed_items.append({"name": name_part, "price": item_price, "qty": item_qty})
@@ -373,7 +353,6 @@ async def catch_reactions(reaction: types.MessageReactionUpdated):
                 name_lower = item["name"].lower()
                 num_aliases = NUMBER_ALIASES.get(idx, [str(idx)])
 
-                # Шукаємо стільки разів, скільки фізично є цього товару в лоті
                 for _ in range(item["qty"]):
                     match_found = False
 
@@ -383,54 +362,49 @@ async def catch_reactions(reaction: types.MessageReactionUpdated):
                         if target in padded_comment:
                             match_found = True
                             padded_comment = padded_comment.replace(target, " ", 1)
-                            # ДОДАНО: Стираємо знайдену цифру і з текстового коментаря,
-                            # щоб бот не знаходив її вдруге вже як буквальне ім'я персонажа
-                            comment_lower = re.sub(rf'\b{num_alias}\b', ' ', comment_lower, count=1)
+                            comment_lower = re.sub(rf'\b{re.escape(num_alias)}\b', ' ', comment_lower, count=1)
                             break
 
-                    # Перевірка по іменах
+                    # ЗМІНЕНО: Перевірка по іменах (з використанням регулярних виразів \b для меж слова)
                     if not match_found:
-                        if name_lower in comment_lower:
+                        if re.search(rf'\b{re.escape(name_lower)}\b', comment_lower):
                             match_found = True
-                            comment_lower = comment_lower.replace(name_lower, " ", 1)
+                            comment_lower = re.sub(rf'\b{re.escape(name_lower)}\b', ' ', comment_lower, count=1)
                         else:
                             for canonical, aliases in ALIASES.items():
                                 if name_lower == canonical or name_lower in aliases:
-                                    if canonical in comment_lower:
+                                    if re.search(rf'\b{re.escape(canonical)}\b', comment_lower):
                                         match_found = True
-                                        comment_lower = comment_lower.replace(canonical, " ", 1)
+                                        comment_lower = re.sub(rf'\b{re.escape(canonical)}\b', ' ', comment_lower, count=1)
                                         break
-
-                                    matched_alias = next((a for a in aliases if a in comment_lower), None)
+                                    
+                                    matched_alias = next((a for a in aliases if re.search(rf'\b{re.escape(a)}\b', comment_lower)), None)
                                     if matched_alias:
                                         match_found = True
-                                        comment_lower = comment_lower.replace(matched_alias, " ", 1)
+                                        comment_lower = re.sub(rf'\b{re.escape(matched_alias)}\b', ' ', comment_lower, count=1)
                                         break
 
-                    # План В: перевірка по типу (тільки якщо лот одиночний)
+                    # ЗМІНЕНО: План В перевірка по типу (теж додано \b)
                     if not match_found and merch_type.lower() != "невідомо" and len(parsed_items) == 1:
                         type_words = [w for w in re.findall(r'[а-яіїєґa-z]+', merch_type.lower()) if len(w) >= 4]
                         for t_word in type_words:
-                            if t_word in comment_lower:
+                            if re.search(rf'\b{re.escape(t_word)}\b', comment_lower):
                                 match_found = True
-                                comment_lower = comment_lower.replace(t_word, " ", 1)
+                                comment_lower = re.sub(rf'\b{re.escape(t_word)}\b', ' ', comment_lower, count=1)
                                 break
 
                     if match_found:
                         matched_qty += 1
 
-                # Якщо знайшли хоча б 1 раз і є "х2", збільшуємо кількість
                 if matched_qty > 0 and global_mult > 1:
                     matched_qty = max(matched_qty, global_mult)
-                    matched_qty = min(matched_qty, item["qty"]) # Але не більше, ніж є в лоті
+                    matched_qty = min(matched_qty, item["qty"]) 
 
-                # Додаємо в список бажаних покупок
                 for _ in range(matched_qty):
                     new_item = item.copy()
                     new_item["display_name"] = f"{idx}. {item['name']}"
                     requested_items.append(new_item)
 
-            # Якщо нічого не знайшли, але лот один (можливо просто "+")
             if not requested_items and len(parsed_items) == 1:
                 matched_qty = min(global_mult, parsed_items[0]["qty"])
                 for _ in range(matched_qty):
@@ -454,7 +428,7 @@ async def catch_reactions(reaction: types.MessageReactionUpdated):
 
             conn.commit()
 
-            # --- ПЕРЕВІРКА НА НЕРОЗПІЗНАНІ АБО ПРОПУЩЕНІ СЛОВА ---
+            # ЗМІНЕНО: Перевірка на нерозпізнані або пропущені слова (додано \b)
             leftover_request = False
             for n in range(1, 37):
                 for num_alias in NUMBER_ALIASES.get(n, [str(n)]):
@@ -465,11 +439,10 @@ async def catch_reactions(reaction: types.MessageReactionUpdated):
 
             if not leftover_request:
                 for canonical, aliases in ALIASES.items():
-                    if canonical in comment_lower or any(a in comment_lower for a in aliases):
+                    if re.search(rf'\b{re.escape(canonical)}\b', comment_lower) or any(re.search(rf'\b{re.escape(a)}\b', comment_lower) for a in aliases):
                         leftover_request = True
                         break
 
-            # Чи не отримала людина все, що хотіла? (часткове бронювання)
             partial_booking = len(successfully_booked) < len(requested_items) or leftover_request
 
             if successfully_booked:
@@ -519,9 +492,6 @@ async def generate_invoices(callback: types.CallbackQuery):
             
         user_buckets[username]["total"] += booked_price
         
-    # --- ЗМІНЕНО: Нова залізобетонна логіка нарізки тексту ---
-    
-    # Спочатку збираємо ВСІ чеки в один довгий текст
     full_text = "📋 <b>ГОТОВІ ТЕКСТИ ДЛЯ ВІДПИСКИ ПОКУПЦЯМ:</b>\n\n"
     
     for username, data in user_buckets.items():
@@ -529,22 +499,17 @@ async def generate_invoices(callback: types.CallbackQuery):
         user_block = f"<code>{username}</code>\nПривіт, пишу з приводу броней зі стріма:\n{items_string}\n<b>До сплати:</b> {data['total']} грн.\n___________________________\n\n"
         full_text += user_block
         
-    # Тепер ріжемо цей величезний текст на шматки (не більше 4000 символів)
     while len(full_text) > 4000:
-        # Шукаємо останній перенос рядка перед лімітом, щоб не розірвати HTML-теги посередині
         split_pos = full_text.rfind('\n', 0, 4000)
         
-        # Якщо переносу чомусь немає (дуже малоймовірно), ріжемо жорстко по ліміту
         if split_pos == -1: 
             split_pos = 4000
             
         part_to_send = full_text[:split_pos]
         await callback.message.answer(part_to_send, parse_mode="HTML", disable_web_page_preview=True)
         
-        # Відрізаємо відправлену частину від основного тексту і продовжуємо
         full_text = full_text[split_pos:].lstrip('\n')
         
-    # Відправляємо залишок тексту, який залишився після всіх відрізань
     if full_text.strip():
         await callback.message.answer(full_text, parse_mode="HTML", disable_web_page_preview=True)
         
@@ -556,7 +521,7 @@ async def on_startup(bot: Bot):
         try:
             await bot.send_message(admin_id, "✅ Бот успішно запущений і готовий до роботи на ОСІННЬОМУ стрімі!")
         except Exception as e:
-            print(f"[Помилка] Не вдалося написати адміну {admin_id} про запуск. Можливо, він не натискав /start у ЛС з ботом.")
+            print(f"[Помилка] Не вдалося написати адміну {admin_id} про запуск.")
 
 @dp.shutdown()
 async def on_shutdown(bot: Bot):
@@ -565,18 +530,17 @@ async def on_shutdown(bot: Bot):
             await bot.send_message(admin_id, "🛑 Бот вимкнений! Обробка броней призупинена.")
         except Exception as e:
             print(f"[Помилка] Не вдалося написати адміну {admin_id} про вимкнення.")
+
 @dp.callback_query(F.data == "my_invoice")
 async def get_my_invoice(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     
-    # Шукаємо броні ТІЛЬКИ для того користувача, який натиснув кнопку
     cursor.execute('''SELECT m.merch_type, b.booked_character, b.booked_price, b.chat_id, b.message_id, m.is_auction 
                       FROM bookings b JOIN merch m ON b.merch_id = m.id 
                       WHERE b.user_id = ?''', (user_id,))
     user_bookings = cursor.fetchall()
     
     if not user_bookings:
-        # Якщо броней немає, показуємо спливаюче віконце
         await callback.answer("У тебе поки що немає зафіксованих броней. 🥺", show_alert=True)
         return
         
@@ -603,7 +567,6 @@ async def get_my_invoice(callback: types.CallbackQuery):
         f"<b>💰 Загалом до сплати:</b> {total} грн."
     )
     
-    # --- ДОДАНО: Логіка нарізки тексту для великих особистих чеків ---
     while len(receipt_msg) > 4000:
         split_pos = receipt_msg.rfind('\n', 0, 4000)
         
