@@ -183,7 +183,7 @@ user_keyboard = InlineKeyboardMarkup(inline_keyboard=[
 @dp.message(CommandStart())
 async def command_start_handler(message: types.Message):
     if message.from_user.id in ADMIN_IDS:
-        await message.answer("Перевірка змін. Привіт, адміне! Бот готовий до стріму.", reply_markup=admin_keyboard)
+        await message.answer("Привіт, адміне! Бот готовий до стріму.", reply_markup=admin_keyboard)
     else:
         # ДОДАНО: Привітання для звичайних користувачів
         await message.answer(
@@ -621,7 +621,7 @@ async def get_my_invoice(callback: types.CallbackQuery):
     await callback.answer()
 
 async def main():
-    print("Бот запущений! Підтримка аукціонів активована.")
+    print("Готуємось до осіннього стріму! Бот запущений")
     await dp.start_polling(bot, allowed_updates=["message", "callback_query", "message_reaction", "edited_message"])
 
 if __name__ == "__main__":
