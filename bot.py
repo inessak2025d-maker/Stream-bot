@@ -183,7 +183,7 @@ user_keyboard = InlineKeyboardMarkup(inline_keyboard=[
 @dp.message(CommandStart())
 async def command_start_handler(message: types.Message):
     if message.from_user.id in ADMIN_IDS:
-        await message.answer("Привіт, адміне! Бот готовий до стріму.", reply_markup=admin_keyboard)
+        await message.answer("Привіт, адміне! Бот готовий до осіннього стріму.", reply_markup=admin_keyboard)
     else:
         # ДОДАНО: Привітання для звичайних користувачів
         await message.answer(
