@@ -192,7 +192,7 @@ user_keyboard = InlineKeyboardMarkup(inline_keyboard=[
 # =================================================================
 # ЯДРО БРОНЮВАННЯ (спільна функція для реакцій і мануального вводу)
 # =================================================================
-async def process_booking(buyer_user_id, buyer_username, merch_id, chat_id, booking_message_id, comment_text, notify_message_id, is_manual=False):
+async def process_booking(buyer_user_id, buyer_username, merch_id, chat_id, booking_message_id, comment_text, notify_message_id, is_manual=False, force=False):
     cursor.execute("SELECT character, price, is_auction, merch_type FROM merch WHERE id = ?", (merch_id,))
     merch_row = cursor.fetchone()
     if not merch_row: return
@@ -207,7 +207,9 @@ async def process_booking(buyer_user_id, buyer_username, merch_id, chat_id, book
         if bid_match:
             final_price = int(bid_match.group(1))
             cursor.execute("SELECT id FROM bookings WHERE merch_id = ?", (merch_id,))
-            if cursor.fetchone():
+            
+            # Якщо це аукціон і ми його форсуємо - просто перезаписуємо переможця, інакше блокуємо
+            if cursor.fetchone() and not force:
                 print(f"[ЛОГ] УВАГА: Аукціон №{merch_id} вже завершено. Повторна ставка від {buyer_username} ігнорується.")
                 return
 
@@ -217,7 +219,8 @@ async def process_booking(buyer_user_id, buyer_username, merch_id, chat_id, book
             print(f"[ЛОГ] ФІКСАЦІЯ АУКЦІОНУ: {buyer_username} виграв '{merch_type}' зі ставкою {final_price} грн")
             
             try:
-                await bot.send_message(chat_id, f"✅ {buyer_username} перемагає в аукціоні зі ставкою {final_price} грн!", reply_to_message_id=notify_message_id)
+                prefix = "⚠️ ПРИМУСОВО: " if force else "✅ "
+                await bot.send_message(chat_id, f"{prefix}{buyer_username} перемагає в аукціоні зі ставкою {final_price} грн!", reply_to_message_id=notify_message_id)
             except:
                 pass
         else:
@@ -322,7 +325,8 @@ async def process_booking(buyer_user_id, buyer_username, merch_id, chat_id, book
     for item in requested_items:
         current_bookings_count = already_booked.count(item["display_name"]) + already_booked.count(item["name"])
 
-        if current_bookings_count < item["qty"]:
+        # ЗМІНЕНО: Якщо force=True, ми ігноруємо ліміт кількості і дозволяємо бронювати далі
+        if current_bookings_count < item["qty"] or force:
             cursor.execute("INSERT INTO bookings (user_id, username, merch_id, chat_id, message_id, booked_character, booked_price) VALUES (?, ?, ?, ?, ?, ?, ?)",
                            (buyer_user_id, buyer_username, merch_id, chat_id, booking_message_id, item["display_name"], item["price"]))
 
@@ -349,17 +353,18 @@ async def process_booking(buyer_user_id, buyer_username, merch_id, chat_id, book
 
     if successfully_booked:
         print(f"[ЛОГ] ФІКСАЦІЯ: {buyer_username} отримав: {', '.join(successfully_booked)}")
-        if partial_booking:
+        if partial_booking and not force:
             booked_str = ", ".join(successfully_booked)
             try:
                 await bot.send_message(chat_id, f"{buyer_username}, зарахована бронь лише: {booked_str}", reply_to_message_id=notify_message_id)
             except Exception as e:
                 print(f"[Помилка відправки повідомлення] {e}")
         else:
-            if is_manual:
+            if is_manual or force:
                 booked_str = ", ".join(successfully_booked)
+                prefix = "⚠️ ПРИМУСОВА БРОНЬ" if force else "✅ Ручна бронь"
                 try:
-                    await bot.send_message(chat_id, f"✅ Ручна бронь для {buyer_username} успішна: {booked_str}", reply_to_message_id=notify_message_id)
+                    await bot.send_message(chat_id, f"{prefix} для {buyer_username} успішна: {booked_str}", reply_to_message_id=notify_message_id)
                 except:
                     pass
     else:
@@ -388,7 +393,6 @@ async def command_start_handler(message: types.Message):
             reply_markup=user_keyboard
         )
 
-# ДОДАНО: Команда /db для скачування бази даних
 @dp.message(F.text == "/db")
 async def send_db_file(message: types.Message):
     if message.from_user.id in ADMIN_IDS:
@@ -398,7 +402,47 @@ async def send_db_file(message: types.Message):
         else:
             await message.answer("❌ База даних ще порожня або файл не знайдено.")
 
-# ДОДАНО: Обробник для ручної броні
+# ДОДАНО: Обробник для ПРИМУСОВОЇ броні (ігнорує ліміти)
+@dp.message(F.text, F.text.lower().startswith("примусово"), F.reply_to_message)
+async def force_booking_handler(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+
+    parts = message.text.split(maxsplit=2)
+    if len(parts) < 3:
+        await message.reply("❌ Неправильний формат. Використовуй: примусово @username текст_броні")
+        return
+        
+    target_username = parts[1]
+    booking_text = parts[2]
+    
+    if not target_username.startswith("@"):
+        target_username = "@" + target_username
+
+    cursor.execute("SELECT merch_id FROM chat_log WHERE message_id = ?", (message.reply_to_message.message_id,))
+    row = cursor.fetchone()
+    
+    if row and row[0]:
+        merch_id = row[0]
+        
+        cursor.execute("SELECT user_id FROM chat_log WHERE username = ? OR username = ? LIMIT 1", (target_username, target_username.lstrip('@')))
+        user_row = cursor.fetchone()
+        buyer_user_id = user_row[0] if user_row else 0
+        
+        await process_booking(
+            buyer_user_id=buyer_user_id,
+            buyer_username=target_username,
+            merch_id=merch_id,
+            chat_id=message.chat.id,
+            booking_message_id=message.message_id,
+            comment_text=booking_text,
+            notify_message_id=message.message_id,
+            is_manual=True,
+            force=True
+        )
+    else:
+        await message.reply("❌ Не вдалося знайти лот. Переконайтеся, що відповідаєте на пост з мерчем або на коментар під ним.")
+
 @dp.message(F.text, F.text.lower().startswith("бронь"), F.reply_to_message)
 async def manual_booking_handler(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
@@ -421,7 +465,6 @@ async def manual_booking_handler(message: types.Message):
     if row and row[0]:
         merch_id = row[0]
         
-        # Спробуємо знайти реальний ID користувача, якщо він щось писав у чат (щоб чек працював)
         cursor.execute("SELECT user_id FROM chat_log WHERE username = ? OR username = ? LIMIT 1", (target_username, target_username.lstrip('@')))
         user_row = cursor.fetchone()
         buyer_user_id = user_row[0] if user_row else 0
@@ -434,12 +477,12 @@ async def manual_booking_handler(message: types.Message):
             booking_message_id=message.message_id,
             comment_text=booking_text,
             notify_message_id=message.message_id,
-            is_manual=True
+            is_manual=True,
+            force=False
         )
     else:
         await message.reply("❌ Не вдалося знайти лот. Переконайтеся, що відповідаєте на пост з мерчем або на коментар під ним.")
 
-# ДОДАНО: Коротка команда "+" (аналог сердечка) через відповідь на коментар
 @dp.message(F.text == "+", F.reply_to_message)
 async def quick_plus_booking(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
@@ -450,14 +493,12 @@ async def quick_plus_booking(message: types.Message):
     buyer_username = f"@{buyer_msg.from_user.username}" if buyer_msg.from_user.username else buyer_msg.from_user.full_name
     comment_text = buyer_msg.text or buyer_msg.caption or ""
 
-    # Знаходимо, до якого лоту належить коментар покупця
     cursor.execute("SELECT merch_id FROM chat_log WHERE message_id = ?", (buyer_msg.message_id,))
     row = cursor.fetchone()
 
     if row and row[0]:
         merch_id = row[0]
         
-        # Запускаємо стандартне ядро бронювання (як при сердечку)
         await process_booking(
             buyer_user_id=buyer_user_id,
             buyer_username=buyer_username,
@@ -465,8 +506,9 @@ async def quick_plus_booking(message: types.Message):
             chat_id=message.chat.id,
             booking_message_id=buyer_msg.message_id,
             comment_text=comment_text,
-            notify_message_id=message.message_id, # Бот відповість на твій плюс
-            is_manual=False
+            notify_message_id=message.message_id,
+            is_manual=False,
+            force=False
         )
     else:
         await message.reply("❌ Не вдалося знайти лот для цього коментаря.")
@@ -566,7 +608,6 @@ async def catch_reactions(reaction: types.MessageReactionUpdated):
         if buyer and buyer[2]:
             buyer_user_id, buyer_username, merch_id, comment_text = buyer
             
-            # Звертаємося до нашої спільної функції бронювання
             await process_booking(
                 buyer_user_id=buyer_user_id,
                 buyer_username=buyer_username,
@@ -575,7 +616,8 @@ async def catch_reactions(reaction: types.MessageReactionUpdated):
                 booking_message_id=reaction.message_id,
                 comment_text=comment_text,
                 notify_message_id=reaction.message_id,
-                is_manual=False
+                is_manual=False,
+                force=False
             )
 
     elif had_heart_before and not has_heart_now:
@@ -603,7 +645,6 @@ async def generate_invoices(callback: types.CallbackQuery):
         link = f"https://t.me/c/{chat_id_str[4:]}/{msg_id}" if chat_id_str.startswith("-100") else ""
         link_text = f" <a href='{link}'>[Показати коментар]</a>" if link else ""
         
-        # ЗМІНЕНО: Приховуємо "Архів Пʼятниці", щоб не було подвійних пробілів
         m_prefix = f"{merch_type} " if merch_type and merch_type != "Архів Пʼятниці" else ""
         
         if is_auction:
@@ -670,7 +711,6 @@ async def get_my_invoice(callback: types.CallbackQuery):
         link = f"https://t.me/c/{chat_id_str[4:]}/{msg_id}" if chat_id_str.startswith("-100") else ""
         link_text = f" <a href='{link}'>[Показати коментар]</a>" if link else ""
         
-        # ЗМІНЕНО: Приховуємо "Архів Пʼятниці"
         m_prefix = f"{merch_type} " if merch_type and merch_type != "Архів Пʼятниці" else ""
         
         if is_auction:
@@ -698,7 +738,6 @@ async def get_my_invoice(callback: types.CallbackQuery):
 
 @dp.message(F.text, F.text.startswith("/import_receipt"), F.from_user.id.in_(ADMIN_IDS))
 async def import_receipt_command(message: types.Message):
-    # Використовуємо html_text, щоб дістати приховані гіперпосилання
     html_text = message.html_text or ""
     html_text = re.sub(r'^/import_receipt\s*', '', html_text)
     
@@ -706,7 +745,6 @@ async def import_receipt_command(message: types.Message):
         await message.reply("❌ Встав текст чеку після команди.")
         return
 
-    # ЗМІНЕНО: Замість 'Архів Пʼятниці' тепер просто порожній рядок ''
     cursor.execute("INSERT INTO merch (game, merch_type, character, price) VALUES ('Архів', '', 'Різне', 0)")
     dummy_merch_id = cursor.lastrowid
 
@@ -719,14 +757,12 @@ async def import_receipt_command(message: types.Message):
         
         lines = block.split('\n')
         
-        # Витягуємо юзернейм
         un_match = re.search(r'@[\w\d_]+', lines[0])
         if not un_match: continue
         username = un_match.group(0)
 
         for line in lines:
             line = line.strip()
-            # Очищений рядок для перевірок, щоб HTML-теги не заважали
             clean_start = re.sub(r'<[^>]+>', '', line).strip()
             
             if clean_start.startswith('-') or clean_start.startswith('•'):
@@ -736,13 +772,11 @@ async def import_receipt_command(message: types.Message):
                 chat_id = message.chat.id
                 msg_id = message.message_id
                 
-                # Шукаємо гіперпосилання на коментар у сирому HTML
                 link_match = re.search(r'href=["\']https://t\.me/c/(\d+)/(\d+)["\']', line)
                 if link_match:
                     chat_id = int(f"-100{link_match.group(1)}")
                     msg_id = int(link_match.group(2))
                 
-                # Чистимо назву лоту від сміття та слів "[Показати коментар]"
                 item_name = clean_start
                 item_name = re.sub(r'^[-•]\s*', '', item_name)
                 item_name = re.sub(r'\(\d+\s*грн\)', '', item_name)
@@ -756,7 +790,6 @@ async def import_receipt_command(message: types.Message):
     conn.commit()
     await message.reply(f"✅ Успішно імпортовано {count} броней! Гіперпосилання та координати збережено.")
 
-# ДОДАНО: Команда очищення бази даних
 @dp.message(F.text == "/clear_db")
 async def clear_db_command(message: types.Message):
     if message.from_user.id in ADMIN_IDS:
@@ -781,7 +814,6 @@ async def cancel_clear(callback: types.CallbackQuery):
     if callback.from_user.id in ADMIN_IDS:
         await callback.message.edit_text("❌ Очищення скасовано.")
 
-# ДОДАНО: Перевірка броней конкретного користувача для точкового видалення
 @dp.message(F.text, F.text.startswith("/check "), F.from_user.id.in_(ADMIN_IDS))
 async def check_user_bookings(message: types.Message):
     parts = message.text.split(maxsplit=1)
@@ -793,7 +825,6 @@ async def check_user_bookings(message: types.Message):
     if not target_username.startswith("@"):
         target_username = "@" + target_username
 
-    # ЗМІНЕНО: Додано chat_id та message_id для формування посилання
     cursor.execute('''SELECT b.id, m.merch_type, b.booked_character, b.booked_price, b.chat_id, b.message_id 
                       FROM bookings b JOIN merch m ON b.merch_id = m.id 
                       WHERE b.username = ? OR b.username = ?''', (target_username, target_username.lstrip('@')))
@@ -806,7 +837,6 @@ async def check_user_bookings(message: types.Message):
     lines = [f"👤 <b>Броні {target_username}:</b>\n"]
     for b_id, m_type, b_char, b_price, chat_id, msg_id in user_bookings:
         
-        # ЗМІНЕНО: Створюємо лінку [Бронь]
         chat_id_str = str(chat_id)
         link = f"https://t.me/c/{chat_id_str[4:]}/{msg_id}" if chat_id_str.startswith("-100") else ""
         link_text = f" <a href='{link}'>[Бронь]</a>" if link else ""
@@ -821,7 +851,6 @@ async def check_user_bookings(message: types.Message):
         if split_pos == -1: split_pos = 4000
             
         part_to_send = full_text[:split_pos]
-        # ЗМІНЕНО: Вимикаємо прев'ю посилань, щоб чат не спамило картинками
         await message.answer(part_to_send, parse_mode="HTML", disable_web_page_preview=True)
         full_text = full_text[split_pos:].lstrip('\n')
         
@@ -829,15 +858,12 @@ async def check_user_bookings(message: types.Message):
         await message.answer(full_text, parse_mode="HTML", disable_web_page_preview=True)
 
 
-# ДОДАНО: Точкове видалення конкретної броні за її ID
 @dp.message(F.text, F.text.regexp(r"^/rm_(\d+)$"), F.from_user.id.in_(ADMIN_IDS))
 async def remove_booking_by_id(message: types.Message):
-    # Витягуємо цифру (ID) з команди
     match = re.match(r"^/rm_(\d+)$", message.text)
     if not match: return
     booking_id = int(match.group(1))
 
-    # Спочатку дізнаємося, що саме ми видаляємо, щоб написати гарний звіт
     cursor.execute('''SELECT b.username, m.merch_type, b.booked_character 
                       FROM bookings b JOIN merch m ON b.merch_id = m.id 
                       WHERE b.id = ?''', (booking_id,))
@@ -849,7 +875,6 @@ async def remove_booking_by_id(message: types.Message):
 
     username, m_type, b_char = row
     
-    # Видаляємо рівно один рядок з бази даних
     cursor.execute("DELETE FROM bookings WHERE id = ?", (booking_id,))
     conn.commit()
 
