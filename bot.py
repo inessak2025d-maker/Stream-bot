@@ -669,6 +669,51 @@ async def get_my_invoice(callback: types.CallbackQuery):
         
     await callback.answer()
 
+@dp.message(F.text.startswith("/import_receipt") & (F.from_user.id.in_(ADMIN_IDS)))
+async def import_receipt_command(message: types.Message):
+    # Відрізаємо саму команду, залишаємо лише текст чеку
+    text = message.text.replace("/import_receipt", "").strip()
+    if not text:
+        await message.reply("❌ Встав текст чеку після команди. Наприклад:\n/import_receipt @username\n- Товар (25 грн)")
+        return
+
+    # Створюємо фіктивний лот для п'ятничних броней, щоб базі було до чого їх прив'язати
+    cursor.execute("INSERT INTO merch (game, merch_type, character, price) VALUES ('Архів', 'Архів Пʼятниці', 'Різне', 0)")
+    dummy_merch_id = cursor.lastrowid
+
+    # Розбиваємо текст по юзернеймах (шукаємо символ @)
+    blocks = re.split(r'(?=@[\w\d_]+)', text)
+    count = 0
+    
+    for block in blocks:
+        block = block.strip()
+        if not block: continue
+        
+        lines = block.split('\n')
+        username = lines[0].strip()
+        if not username.startswith('@'): continue
+
+        for line in lines:
+            line = line.strip()
+            # Шукаємо рядки, які починаються з мінуса або крапки (як у твоєму чеку)
+            if line.startswith('-') or line.startswith('•'):
+                
+                # Витягуємо ціну в дужках, наприклад (25 грн)
+                price_match = re.search(r'\((\d+)\s*грн\)', line, re.IGNORECASE)
+                price = int(price_match.group(1)) if price_match else 0
+                
+                # Витягуємо назву (відрізаємо мінус на початку і ціну в кінці)
+                item_name = re.sub(r'^[-•]\s*', '', line)
+                item_name = re.sub(r'\(\d+\s*грн\)', '', item_name).strip()
+                
+                # Записуємо бронь на користувача
+                cursor.execute("INSERT INTO bookings (user_id, username, merch_id, chat_id, message_id, booked_character, booked_price) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                               (0, username, dummy_merch_id, message.chat.id, message.message_id, item_name, price))
+                count += 1
+    
+    conn.commit()
+    await message.reply(f"✅ Успішно імпортовано {count} броней з тексту! Тепер вони з'являться у фінальних чеках.")
+
 async def main():
     print("Готуємось до осіннього стріму! Бот запущений")
     await dp.start_polling(bot, allowed_updates=["message", "callback_query", "message_reaction", "edited_message"])
