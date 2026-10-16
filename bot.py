@@ -671,18 +671,18 @@ async def get_my_invoice(callback: types.CallbackQuery):
 
 @dp.message(F.text.startswith("/import_receipt") & (F.from_user.id.in_(ADMIN_IDS)))
 async def import_receipt_command(message: types.Message):
-    # Відрізаємо саму команду, залишаємо лише текст чеку
-    text = message.text.replace("/import_receipt", "").strip()
-    if not text:
-        await message.reply("❌ Встав текст чеку після команди. Наприклад:\n/import_receipt @username\n- Товар (25 грн)")
+    # Використовуємо html_text, щоб дістати приховані гіперпосилання
+    html_text = message.html_text or ""
+    html_text = re.sub(r'^/import_receipt\s*', '', html_text)
+    
+    if not html_text.strip():
+        await message.reply("❌ Встав текст чеку після команди.")
         return
 
-    # Створюємо фіктивний лот для п'ятничних броней, щоб базі було до чого їх прив'язати
     cursor.execute("INSERT INTO merch (game, merch_type, character, price) VALUES ('Архів', 'Архів Пʼятниці', 'Різне', 0)")
     dummy_merch_id = cursor.lastrowid
 
-    # Розбиваємо текст по юзернеймах (шукаємо символ @)
-    blocks = re.split(r'(?=@[\w\d_]+)', text)
+    blocks = re.split(r'(?=@[\w\d_]+)', html_text)
     count = 0
     
     for block in blocks:
@@ -690,29 +690,68 @@ async def import_receipt_command(message: types.Message):
         if not block: continue
         
         lines = block.split('\n')
-        username = lines[0].strip()
-        if not username.startswith('@'): continue
+        
+        # Витягуємо юзернейм
+        un_match = re.search(r'@[\w\d_]+', lines[0])
+        if not un_match: continue
+        username = un_match.group(0)
 
         for line in lines:
             line = line.strip()
-            # Шукаємо рядки, які починаються з мінуса або крапки (як у твоєму чеку)
-            if line.startswith('-') or line.startswith('•'):
-                
-                # Витягуємо ціну в дужках, наприклад (25 грн)
-                price_match = re.search(r'\((\d+)\s*грн\)', line, re.IGNORECASE)
+            # Очищений рядок для перевірок, щоб HTML-теги не заважали
+            clean_start = re.sub(r'<[^>]+>', '', line).strip()
+            
+            if clean_start.startswith('-') or clean_start.startswith('•'):
+                price_match = re.search(r'\((\d+)\s*грн\)', clean_start, re.IGNORECASE)
                 price = int(price_match.group(1)) if price_match else 0
                 
-                # Витягуємо назву (відрізаємо мінус на початку і ціну в кінці)
-                item_name = re.sub(r'^[-•]\s*', '', line)
-                item_name = re.sub(r'\(\d+\s*грн\)', '', item_name).strip()
+                chat_id = message.chat.id
+                msg_id = message.message_id
                 
-                # Записуємо бронь на користувача
+                # Шукаємо гіперпосилання на коментар у сирому HTML
+                link_match = re.search(r'href=["\']https://t\.me/c/(\d+)/(\d+)["\']', line)
+                if link_match:
+                    chat_id = int(f"-100{link_match.group(1)}")
+                    msg_id = int(link_match.group(2))
+                
+                # Чистимо назву лоту від сміття та слів "[Показати коментар]"
+                item_name = clean_start
+                item_name = re.sub(r'^[-•]\s*', '', item_name)
+                item_name = re.sub(r'\(\d+\s*грн\)', '', item_name)
+                item_name = re.sub(r'\[Показати (коментар|бронь)\]', '', item_name, flags=re.IGNORECASE)
+                item_name = item_name.strip()
+                
                 cursor.execute("INSERT INTO bookings (user_id, username, merch_id, chat_id, message_id, booked_character, booked_price) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                               (0, username, dummy_merch_id, message.chat.id, message.message_id, item_name, price))
+                               (0, username, dummy_merch_id, chat_id, msg_id, item_name, price))
                 count += 1
     
     conn.commit()
-    await message.reply(f"✅ Успішно імпортовано {count} броней з тексту! Тепер вони з'являться у фінальних чеках.")
+    await message.reply(f"✅ Успішно імпортовано {count} броней! Гіперпосилання та координати збережено.")
+
+# ДОДАНО: Команда очищення бази даних
+@dp.message(F.text == "/clear_db")
+async def clear_db_command(message: types.Message):
+    if message.from_user.id in ADMIN_IDS:
+        markup = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⚠️ ТАК, ОЧИСТИТИ", callback_data="confirm_clear_db")],
+            [InlineKeyboardButton(text="❌ Скасувати", callback_data="cancel_clear")]
+        ])
+        await message.reply("Увага! Це повністю видалить **всі лоти та всі броні** з бази.\nВи впевнені, що хочете очистити базу?", reply_markup=markup)
+
+@dp.callback_query(F.data == "confirm_clear_db")
+async def confirm_clear_db(callback: types.CallbackQuery):
+    if callback.from_user.id in ADMIN_IDS:
+        cursor.execute("DELETE FROM bookings")
+        cursor.execute("DELETE FROM merch")
+        cursor.execute("DELETE FROM chat_log")
+        cursor.execute("DELETE FROM stream_state")
+        conn.commit()
+        await callback.message.edit_text("✅ База даних успішно очищена! Можна починати з чистого аркуша.")
+
+@dp.callback_query(F.data == "cancel_clear")
+async def cancel_clear(callback: types.CallbackQuery):
+    if callback.from_user.id in ADMIN_IDS:
+        await callback.message.edit_text("❌ Очищення скасовано.")
 
 async def main():
     print("Готуємось до осіннього стріму! Бот запущений")
