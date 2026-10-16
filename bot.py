@@ -780,7 +780,21 @@ async def check_user_bookings(message: types.Message):
         # Формуємо клікабельну команду для видалення кожної конкретної броні
         lines.append(f"• {m_type} {b_char} ({b_price} грн) ➡️ /rm_{b_id}")
 
-    await message.reply("\n".join(lines), parse_mode="HTML")
+    full_text = "\n".join(lines)
+    
+    # Нарізаємо повідомлення, якщо воно занадто довге (ліміт Телеграму)
+    while len(full_text) > 4000:
+        split_pos = full_text.rfind('\n', 0, 4000)
+        if split_pos == -1: 
+            split_pos = 4000
+            
+        part_to_send = full_text[:split_pos]
+        await message.answer(part_to_send, parse_mode="HTML")
+        
+        full_text = full_text[split_pos:].lstrip('\n')
+        
+    if full_text.strip():
+        await message.answer(full_text, parse_mode="HTML")
 
 
 # ДОДАНО: Точкове видалення конкретної броні за її ID
