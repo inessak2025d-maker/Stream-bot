@@ -9,7 +9,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFil
 
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_IDS = [1060224856, 6249616641, 464072191, 491893726]  # Твої ID
-NOTIFY_ADMIN_IDS = [1060224856,6249616641,464072191]  # ID тих адмінів, яким писати в ЛС про запуск/вимкнення
+NOTIFY_ADMIN_IDS = [1060224856, 6249616641, 464072191]  # ID тих адмінів, яким писати в ЛС про запуск/вимкнення
 
 # === СЛОВНИК СИНОНІМІВ (АЛІАСІВ) ===
 ALIASES = {
@@ -399,7 +399,7 @@ async def send_db_file(message: types.Message):
             await message.answer("❌ База даних ще порожня або файл не знайдено.")
 
 # ДОДАНО: Обробник для ручної броні
-@dp.message(F.text.lower().startswith("бронь") & F.reply_to_message)
+@dp.message(F.text, F.text.lower().startswith("бронь"), F.reply_to_message)
 async def manual_booking_handler(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
         return
@@ -440,7 +440,7 @@ async def manual_booking_handler(message: types.Message):
         await message.reply("❌ Не вдалося знайти лот. Переконайтеся, що відповідаєте на пост з мерчем або на коментар під ним.")
 
 # ДОДАНО: Коротка команда "+" (аналог сердечка) через відповідь на коментар
-@dp.message(F.text == "+" & F.reply_to_message)
+@dp.message(F.text == "+", F.reply_to_message)
 async def quick_plus_booking(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
         return
@@ -701,7 +701,7 @@ async def get_my_invoice(callback: types.CallbackQuery):
         
     await callback.answer()
 
-@dp.message(F.text.startswith("/import_receipt") & (F.from_user.id.in_(ADMIN_IDS)))
+@dp.message(F.text, F.text.startswith("/import_receipt"), F.from_user.id.in_(ADMIN_IDS))
 async def import_receipt_command(message: types.Message):
     # Використовуємо html_text, щоб дістати приховані гіперпосилання
     html_text = message.html_text or ""
@@ -750,7 +750,7 @@ async def import_receipt_command(message: types.Message):
                 item_name = clean_start
                 item_name = re.sub(r'^[-•]\s*', '', item_name)
                 item_name = re.sub(r'\(\d+\s*грн\)', '', item_name)
-                item_name = re.sub(r'\[Показати (коментар|бронь)\]', '', item_name, flags=re.IGNORECASE)
+                item_name = re.sub(r'\[Показати (коментар\vert{}бронь)\]', '', item_name, flags=re.IGNORECASE)
                 item_name = item_name.strip()
                 
                 cursor.execute("INSERT INTO bookings (user_id, username, merch_id, chat_id, message_id, booked_character, booked_price) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -786,7 +786,7 @@ async def cancel_clear(callback: types.CallbackQuery):
         await callback.message.edit_text("❌ Очищення скасовано.")
 
 # ДОДАНО: Перевірка броней конкретного користувача для точкового видалення
-@dp.message(F.text.startswith("/check ") & (F.from_user.id.in_(ADMIN_IDS)))
+@dp.message(F.text, F.text.startswith("/check "), F.from_user.id.in_(ADMIN_IDS))
 async def check_user_bookings(message: types.Message):
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2:
@@ -830,7 +830,7 @@ async def check_user_bookings(message: types.Message):
 
 
 # ДОДАНО: Точкове видалення конкретної броні за її ID
-@dp.message(F.text.regexp(r"^/rm_(\d+)$") & (F.from_user.id.in_(ADMIN_IDS)))
+@dp.message(F.text, F.text.regexp(r"^/rm_(\d+)$"), F.from_user.id.in_(ADMIN_IDS))
 async def remove_booking_by_id(message: types.Message):
     # Витягуємо цифру (ID) з команди
     match = re.match(r"^/rm_(\d+)$", message.text)
