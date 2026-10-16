@@ -5,7 +5,7 @@ import os
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
 
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_IDS = [1060224856, 6249616641, 464072191, 491893726]  # Твої ID
@@ -166,13 +166,11 @@ db_path = os.getenv("DB_PATH", "merch.db")
 conn = sqlite3.connect(db_path)
 cursor = conn.cursor()
 
-# ДОДАНО ПОЛЕ is_auction у таблицю merch
 cursor.execute('''CREATE TABLE IF NOT EXISTS merch (id INTEGER PRIMARY KEY AUTOINCREMENT, photo_id TEXT, game TEXT, merch_type TEXT, character TEXT, price INTEGER, is_auction BOOLEAN DEFAULT 0)''')
 cursor.execute('''CREATE TABLE IF NOT EXISTS stream_state (chat_id INTEGER PRIMARY KEY, active_merch_id INTEGER)''')
 cursor.execute('''CREATE TABLE IF NOT EXISTS chat_log (message_id INTEGER PRIMARY KEY, user_id INTEGER, username TEXT, text TEXT, merch_id INTEGER)''')
 cursor.execute('''CREATE TABLE IF NOT EXISTS bookings (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, username TEXT, merch_id INTEGER, chat_id INTEGER, message_id INTEGER, booked_character TEXT, booked_price INTEGER)''')
 
-# Перевірка та оновлення існуючої таблиці (якщо база стара і колонки is_auction ще немає)
 try:
     cursor.execute("SELECT is_auction FROM merch LIMIT 1")
 except sqlite3.OperationalError:
@@ -191,10 +189,197 @@ user_keyboard = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="🧾 Мій чек", callback_data="my_invoice")]
 ])
 
+# =================================================================
+# ЯДРО БРОНЮВАННЯ (спільна функція для реакцій і мануального вводу)
+# =================================================================
+async def process_booking(buyer_user_id, buyer_username, merch_id, chat_id, booking_message_id, comment_text, notify_message_id, is_manual=False):
+    cursor.execute("SELECT character, price, is_auction, merch_type FROM merch WHERE id = ?", (merch_id,))
+    merch_row = cursor.fetchone()
+    if not merch_row: return
+
+    original_characters = merch_row[0]
+    base_price = merch_row[1]
+    is_auction = merch_row[2]
+    merch_type = merch_row[3]
+
+    if is_auction:
+        bid_match = re.search(r'(\d+)', comment_text)
+        if bid_match:
+            final_price = int(bid_match.group(1))
+            cursor.execute("SELECT id FROM bookings WHERE merch_id = ?", (merch_id,))
+            if cursor.fetchone():
+                print(f"[ЛОГ] УВАГА: Аукціон №{merch_id} вже завершено. Повторна ставка від {buyer_username} ігнорується.")
+                return
+
+            cursor.execute("INSERT INTO bookings (user_id, username, merch_id, chat_id, message_id, booked_character, booked_price) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                           (buyer_user_id, buyer_username, merch_id, chat_id, booking_message_id, "Переможець аукціону", final_price))
+            conn.commit()
+            print(f"[ЛОГ] ФІКСАЦІЯ АУКЦІОНУ: {buyer_username} виграв '{merch_type}' зі ставкою {final_price} грн")
+            
+            try:
+                await bot.send_message(chat_id, f"✅ {buyer_username} перемагає в аукціоні зі ставкою {final_price} грн!", reply_to_message_id=notify_message_id)
+            except:
+                pass
+        else:
+            print(f"[ЛОГ] УВАГА: Не вдалося знайти ставку в коментарі '{comment_text}' від {buyer_username}.")
+        return 
+
+    comment_lower = comment_text.lower()
+    padded_comment = f" {re.sub(r'[,.\-/]', ' ', comment_lower)} "
+
+    mult_match = re.search(r'(?:х|x)\s*(\d+)', comment_lower)
+    global_mult = int(mult_match.group(1)) if mult_match else 1
+
+    char_list = [c.strip() for c in re.split(r',|\n', original_characters) if c.strip()]
+    parsed_items = []
+
+    for c in char_list:
+        item_price = base_price
+        item_qty = 1
+        name_part = c.strip()
+
+        name_part = re.sub(r'^\d+[\.\)]\s*', '', name_part).strip()
+
+        ind_price_match = re.search(r'[-–—\s]+(\d+)\s*(?:грн|uah|грн\.|uah\.)?$', name_part, re.IGNORECASE)
+        if ind_price_match:
+            item_price = int(ind_price_match.group(1))
+            name_part = name_part[:ind_price_match.start()].strip()
+
+        qty_match = re.search(r'(?:\s+)?[xх](\d+)(?:\s+)?$', name_part, re.IGNORECASE)
+        if qty_match:
+            item_qty = int(qty_match.group(1))
+            name_part = name_part[:qty_match.start()].strip()
+            
+        name_part = re.sub(r'\[.*?\]|\(.*?\)', '', name_part).strip()
+        parsed_items.append({"name": name_part, "price": item_price, "qty": item_qty})
+
+    requested_items = []
+    for idx, item in enumerate(parsed_items, start=1):
+        matched_qty = 0
+        name_lower = item["name"].lower()
+        num_aliases = NUMBER_ALIASES.get(idx, [str(idx)])
+
+        for _ in range(item["qty"]):
+            match_found = False
+
+            for num_alias in num_aliases:
+                target = f" {num_alias} "
+                if target in padded_comment:
+                    match_found = True
+                    padded_comment = padded_comment.replace(target, " ", 1)
+                    comment_lower = re.sub(rf'\b{re.escape(num_alias)}\b', ' ', comment_lower, count=1)
+                    break
+
+            if not match_found:
+                if re.search(rf'\b{re.escape(name_lower)}\b', comment_lower):
+                    match_found = True
+                    comment_lower = re.sub(rf'\b{re.escape(name_lower)}\b', ' ', comment_lower, count=1)
+                else:
+                    for canonical, aliases in ALIASES.items():
+                        if name_lower == canonical or name_lower in aliases:
+                            if re.search(rf'\b{re.escape(canonical)}\b', comment_lower):
+                                match_found = True
+                                comment_lower = re.sub(rf'\b{re.escape(canonical)}\b', ' ', comment_lower, count=1)
+                                break
+                            
+                            matched_alias = next((a for a in aliases if re.search(rf'\b{re.escape(a)}\b', comment_lower)), None)
+                            if matched_alias:
+                                match_found = True
+                                comment_lower = re.sub(rf'\b{re.escape(matched_alias)}\b', ' ', comment_lower, count=1)
+                                break
+
+            if not match_found and merch_type.lower() != "невідомо" and len(parsed_items) == 1:
+                type_words = [w for w in re.findall(r'[а-яіїєґa-z]+', merch_type.lower()) if len(w) >= 4]
+                for t_word in type_words:
+                    if re.search(rf'\b{re.escape(t_word)}\b', comment_lower):
+                        match_found = True
+                        comment_lower = re.sub(rf'\b{re.escape(t_word)}\b', ' ', comment_lower, count=1)
+                        break
+
+            if match_found:
+                matched_qty += 1
+
+        if matched_qty > 0 and global_mult > 1:
+            matched_qty = max(matched_qty, global_mult)
+            matched_qty = min(matched_qty, item["qty"]) 
+
+        for _ in range(matched_qty):
+            new_item = item.copy()
+            new_item["display_name"] = f"{idx}. {item['name']}"
+            requested_items.append(new_item)
+
+    if not requested_items and len(parsed_items) == 1:
+        matched_qty = min(global_mult, parsed_items[0]["qty"])
+        for _ in range(matched_qty):
+            new_item = parsed_items[0].copy()
+            new_item["display_name"] = f"1. {parsed_items[0]['name']}"
+            requested_items.append(new_item)
+
+    cursor.execute("SELECT booked_character FROM bookings WHERE merch_id = ?", (merch_id,))
+    already_booked = [row[0] for row in cursor.fetchall()]
+
+    successfully_booked = []
+    for item in requested_items:
+        current_bookings_count = already_booked.count(item["display_name"]) + already_booked.count(item["name"])
+
+        if current_bookings_count < item["qty"]:
+            cursor.execute("INSERT INTO bookings (user_id, username, merch_id, chat_id, message_id, booked_character, booked_price) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                           (buyer_user_id, buyer_username, merch_id, chat_id, booking_message_id, item["display_name"], item["price"]))
+
+            already_booked.append(item["display_name"])
+            successfully_booked.append(f"{item['display_name']} ({item['price']} грн)")
+
+    conn.commit()
+
+    leftover_request = False
+    for n in range(1, 49):
+        for num_alias in NUMBER_ALIASES.get(n, [str(n)]):
+            if f" {num_alias} " in padded_comment:
+                leftover_request = True
+                break
+        if leftover_request: break
+
+    if not leftover_request:
+        for canonical, aliases in ALIASES.items():
+            if re.search(rf'\b{re.escape(canonical)}\b', comment_lower) or any(re.search(rf'\b{re.escape(a)}\b', comment_lower) for a in aliases):
+                leftover_request = True
+                break
+
+    partial_booking = len(successfully_booked) < len(requested_items) or leftover_request
+
+    if successfully_booked:
+        print(f"[ЛОГ] ФІКСАЦІЯ: {buyer_username} отримав: {', '.join(successfully_booked)}")
+        if partial_booking:
+            booked_str = ", ".join(successfully_booked)
+            try:
+                await bot.send_message(chat_id, f"{buyer_username}, зарахована бронь лише: {booked_str}", reply_to_message_id=notify_message_id)
+            except Exception as e:
+                print(f"[Помилка відправки повідомлення] {e}")
+        else:
+            if is_manual:
+                booked_str = ", ".join(successfully_booked)
+                try:
+                    await bot.send_message(chat_id, f"✅ Ручна бронь для {buyer_username} успішна: {booked_str}", reply_to_message_id=notify_message_id)
+                except:
+                    pass
+    else:
+        print(f"[ЛОГ] УВАГА: {buyer_username} нічого не отримав (можливо, закінчилося).")
+        try:
+            msg = f"{buyer_username}, не зарахована бронь. Якщо це помилка - відредагуйте своє повідомлення по зразку поста з мерчом"
+            if is_manual:
+                msg = f"❌ Не вдалося забронювати для {buyer_username} (можливо, товар уже розібрали або не знайдено співпадінь)."
+            await bot.send_message(chat_id, msg, reply_to_message_id=notify_message_id)
+        except Exception as e:
+            print(f"[Помилка відправки повідомлення] {e}")
+
+# =================================================================
+# ОБРОБНИКИ КОМАНД ТА ПОВІДОМЛЕНЬ
+# =================================================================
+
 @dp.message(CommandStart())
 async def command_start_handler(message: types.Message):
     if message.from_user.id in ADMIN_IDS:
-        await message.answer("Перевірка змін. Привіт, адміне! Бот готовий до стріму.", reply_markup=admin_keyboard)
+        await message.answer("Привіт, адміне! Бот готовий до стріму.", reply_markup=admin_keyboard)
     else:
         await message.answer(
             f"Привіт, {message.from_user.first_name}! 👋\n\n"
@@ -203,12 +388,62 @@ async def command_start_handler(message: types.Message):
             reply_markup=user_keyboard
         )
 
+# ДОДАНО: Команда /db для скачування бази даних
+@dp.message(F.text == "/db")
+async def send_db_file(message: types.Message):
+    if message.from_user.id in ADMIN_IDS:
+        if os.path.exists(db_path):
+            db_file = FSInputFile(db_path)
+            await message.answer_document(db_file, caption="📂 Ось актуальний файл бази даних із поточними бронями.")
+        else:
+            await message.answer("❌ База даних ще порожня або файл не знайдено.")
+
+# ДОДАНО: Обробник для ручної броні
+@dp.message(F.text.lower().startswith("бронь") & F.reply_to_message)
+async def manual_booking_handler(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+
+    parts = message.text.split(maxsplit=2)
+    if len(parts) < 3:
+        await message.reply("❌ Неправильний формат. Використовуй: бронь @username текст_броні")
+        return
+        
+    target_username = parts[1]
+    booking_text = parts[2]
+    
+    if not target_username.startswith("@"):
+        target_username = "@" + target_username
+
+    cursor.execute("SELECT merch_id FROM chat_log WHERE message_id = ?", (message.reply_to_message.message_id,))
+    row = cursor.fetchone()
+    
+    if row and row[0]:
+        merch_id = row[0]
+        
+        # Спробуємо знайти реальний ID користувача, якщо він щось писав у чат (щоб чек працював)
+        cursor.execute("SELECT user_id FROM chat_log WHERE username = ? OR username = ? LIMIT 1", (target_username, target_username.lstrip('@')))
+        user_row = cursor.fetchone()
+        buyer_user_id = user_row[0] if user_row else 0
+        
+        await process_booking(
+            buyer_user_id=buyer_user_id,
+            buyer_username=target_username,
+            merch_id=merch_id,
+            chat_id=message.chat.id,
+            booking_message_id=message.message_id,
+            comment_text=booking_text,
+            notify_message_id=message.message_id,
+            is_manual=True
+        )
+    else:
+        await message.reply("❌ Не вдалося знайти лот. Переконайтеся, що відповідаєте на пост з мерчем або на коментар під ним.")
+
 @dp.message(F.chat.type.in_({"group", "supergroup"}))
 async def handle_group_messages(message: types.Message):
     text = message.text or message.caption or ""
     username = f"@{message.from_user.username}" if message.from_user.username else message.from_user.full_name
 
-    # ПЕРЕВІРКА НА АУКЦІОН
     if message.from_user.id in ADMIN_IDS and "Стартова ціна" in text:
         print("[ЛОГ] Знайдено шаблон АУКЦІОНУ! Розшифровую...")
         lines = text.split('\n')
@@ -235,7 +470,6 @@ async def handle_group_messages(message: types.Message):
         print(f"[ЛОГ] Аукціон №{merch_id} ({auction_name}) успішно додано та активовано!")
         return
 
-    # ПЕРЕВІРКА НА ЗВИЧАЙНИЙ ЛОТ
     elif message.from_user.id in ADMIN_IDS and ("Тип:" in text or "Персонаж" in text):
         print("[ЛОГ] Знайдено шаблон лоту! Розшифровую...")
         game_match = re.search(r'Гра:\s*(.*?)(?=\s*Тип:|\s*Персонаж[і]?:|\s*Ціна:|$)', text, re.IGNORECASE | re.DOTALL)
@@ -299,178 +533,18 @@ async def catch_reactions(reaction: types.MessageReactionUpdated):
 
         if buyer and buyer[2]:
             buyer_user_id, buyer_username, merch_id, comment_text = buyer
-
-            cursor.execute("SELECT character, price, is_auction, merch_type FROM merch WHERE id = ?", (merch_id,))
-            merch_row = cursor.fetchone()
-            if not merch_row: return
-
-            original_characters = merch_row[0]
-            base_price = merch_row[1]
-            is_auction = merch_row[2]
-            merch_type = merch_row[3]
-
-            # --- ЛОГІКА ДЛЯ АУКЦІОНУ ---
-            if is_auction:
-                bid_match = re.search(r'(\d+)', comment_text)
-                if bid_match:
-                    final_price = int(bid_match.group(1))
-                    cursor.execute("SELECT id FROM bookings WHERE merch_id = ?", (merch_id,))
-                    if cursor.fetchone():
-                        print(f"[ЛОГ] УВАГА: Аукціон №{merch_id} вже завершено. Повторна ставка від {buyer_username} ігнорується.")
-                        return
-
-                    cursor.execute("INSERT INTO bookings (user_id, username, merch_id, chat_id, message_id, booked_character, booked_price) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                                   (buyer_user_id, buyer_username, merch_id, reaction.chat.id, reaction.message_id, "Переможець аукціону", final_price))
-                    conn.commit()
-                    print(f"[ЛОГ] ФІКСАЦІЯ АУКЦІОНУ: {buyer_username} виграв '{merch_type}' зі ставкою {final_price} грн")
-                else:
-                    print(f"[ЛОГ] УВАГА: Не вдалося знайти ставку в коментарі '{comment_text}' від {buyer_username}.")
-                return 
-
-            # --- ЛОГІКА ДЛЯ ЗВИЧАЙНОГО ЛОТУ ---
-            comment_lower = comment_text.lower()
-            # Додаємо заміну дефісів та слешів на пробіли, щоб номери типу 10-11-12 розпізнавалися коректно
-            padded_comment = f" {re.sub(r'[,.\-/]', ' ', comment_lower)} "
-
-            mult_match = re.search(r'(?:х|x)\s*(\d+)', comment_lower)
-            global_mult = int(mult_match.group(1)) if mult_match else 1
-
-            char_list = [c.strip() for c in re.split(r',|\n', original_characters) if c.strip()]
-            parsed_items = []
-
-            for c in char_list:
-                item_price = base_price
-                item_qty = 1
-                name_part = c.strip()
-
-                name_part = re.sub(r'^\d+[\.\)]\s*', '', name_part).strip()
-
-                ind_price_match = re.search(r'[-–—\s]+(\d+)\s*(?:грн|uah|грн\.|uah\.)?$', name_part, re.IGNORECASE)
-                if ind_price_match:
-                    item_price = int(ind_price_match.group(1))
-                    name_part = name_part[:ind_price_match.start()].strip()
-
-                qty_match = re.search(r'(?:\s+)?[xх](\d+)(?:\s+)?$', name_part, re.IGNORECASE)
-                if qty_match:
-                    item_qty = int(qty_match.group(1))
-                    name_part = name_part[:qty_match.start()].strip()
-                    
-                name_part = re.sub(r'\[.*?\]|\(.*?\)', '', name_part).strip()
-                    
-                parsed_items.append({"name": name_part, "price": item_price, "qty": item_qty})
-
-            requested_items = []
-            for idx, item in enumerate(parsed_items, start=1):
-                matched_qty = 0
-                name_lower = item["name"].lower()
-                num_aliases = NUMBER_ALIASES.get(idx, [str(idx)])
-
-                for _ in range(item["qty"]):
-                    match_found = False
-
-                    # Перевірка по цифрах
-                    for num_alias in num_aliases:
-                        target = f" {num_alias} "
-                        if target in padded_comment:
-                            match_found = True
-                            padded_comment = padded_comment.replace(target, " ", 1)
-                            comment_lower = re.sub(rf'\b{re.escape(num_alias)}\b', ' ', comment_lower, count=1)
-                            break
-
-                    # ЗМІНЕНО: Перевірка по іменах (з використанням регулярних виразів \b для меж слова)
-                    if not match_found:
-                        if re.search(rf'\b{re.escape(name_lower)}\b', comment_lower):
-                            match_found = True
-                            comment_lower = re.sub(rf'\b{re.escape(name_lower)}\b', ' ', comment_lower, count=1)
-                        else:
-                            for canonical, aliases in ALIASES.items():
-                                if name_lower == canonical or name_lower in aliases:
-                                    if re.search(rf'\b{re.escape(canonical)}\b', comment_lower):
-                                        match_found = True
-                                        comment_lower = re.sub(rf'\b{re.escape(canonical)}\b', ' ', comment_lower, count=1)
-                                        break
-                                    
-                                    matched_alias = next((a for a in aliases if re.search(rf'\b{re.escape(a)}\b', comment_lower)), None)
-                                    if matched_alias:
-                                        match_found = True
-                                        comment_lower = re.sub(rf'\b{re.escape(matched_alias)}\b', ' ', comment_lower, count=1)
-                                        break
-
-                    # ЗМІНЕНО: План В перевірка по типу (теж додано \b)
-                    if not match_found and merch_type.lower() != "невідомо" and len(parsed_items) == 1:
-                        type_words = [w for w in re.findall(r'[а-яіїєґa-z]+', merch_type.lower()) if len(w) >= 4]
-                        for t_word in type_words:
-                            if re.search(rf'\b{re.escape(t_word)}\b', comment_lower):
-                                match_found = True
-                                comment_lower = re.sub(rf'\b{re.escape(t_word)}\b', ' ', comment_lower, count=1)
-                                break
-
-                    if match_found:
-                        matched_qty += 1
-
-                if matched_qty > 0 and global_mult > 1:
-                    matched_qty = max(matched_qty, global_mult)
-                    matched_qty = min(matched_qty, item["qty"]) 
-
-                for _ in range(matched_qty):
-                    new_item = item.copy()
-                    new_item["display_name"] = f"{idx}. {item['name']}"
-                    requested_items.append(new_item)
-
-            if not requested_items and len(parsed_items) == 1:
-                matched_qty = min(global_mult, parsed_items[0]["qty"])
-                for _ in range(matched_qty):
-                    new_item = parsed_items[0].copy()
-                    new_item["display_name"] = f"1. {parsed_items[0]['name']}"
-                    requested_items.append(new_item)
-
-            cursor.execute("SELECT booked_character FROM bookings WHERE merch_id = ?", (merch_id,))
-            already_booked = [row[0] for row in cursor.fetchall()]
-
-            successfully_booked = []
-            for item in requested_items:
-                current_bookings_count = already_booked.count(item["display_name"]) + already_booked.count(item["name"])
-
-                if current_bookings_count < item["qty"]:
-                    cursor.execute("INSERT INTO bookings (user_id, username, merch_id, chat_id, message_id, booked_character, booked_price) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                                   (buyer_user_id, buyer_username, merch_id, reaction.chat.id, reaction.message_id, item["display_name"], item["price"]))
-
-                    already_booked.append(item["display_name"])
-                    successfully_booked.append(f"{item['display_name']} ({item['price']} грн)")
-
-            conn.commit()
-
-            # ЗМІНЕНО: Перевірка на нерозпізнані або пропущені слова (додано \b)
-            leftover_request = False
-            for n in range(1, 49):
-                for num_alias in NUMBER_ALIASES.get(n, [str(n)]):
-                    if f" {num_alias} " in padded_comment:
-                        leftover_request = True
-                        break
-                if leftover_request: break
-
-            if not leftover_request:
-                for canonical, aliases in ALIASES.items():
-                    if re.search(rf'\b{re.escape(canonical)}\b', comment_lower) or any(re.search(rf'\b{re.escape(a)}\b', comment_lower) for a in aliases):
-                        leftover_request = True
-                        break
-
-            partial_booking = len(successfully_booked) < len(requested_items) or leftover_request
-
-            if successfully_booked:
-                print(f"[ЛОГ] ФІКСАЦІЯ: {buyer_username} отримав: {', '.join(successfully_booked)}")
-                if partial_booking:
-                    booked_str = ", ".join(successfully_booked)
-                    try:
-                        await bot.send_message(reaction.chat.id, f"{buyer_username}, зарахована бронь лише: {booked_str}", reply_to_message_id=reaction.message_id)
-                    except Exception as e:
-                        print(f"[Помилка відправки повідомлення] {e}")
-            else:
-                print(f"[ЛОГ] УВАГА: {buyer_username} нічого не отримав.")
-                try:
-                    await bot.send_message(reaction.chat.id, f"{buyer_username}, не зарахована бронь. Якщо це помилка - відредагуйте своє повідомлення по зразку поста з мерчом", reply_to_message_id=reaction.message_id)
-                except Exception as e:
-                    print(f"[Помилка відправки повідомлення] {e}")
+            
+            # Звертаємося до нашої спільної функції бронювання
+            await process_booking(
+                buyer_user_id=buyer_user_id,
+                buyer_username=buyer_username,
+                merch_id=merch_id,
+                chat_id=reaction.chat.id,
+                booking_message_id=reaction.message_id,
+                comment_text=comment_text,
+                notify_message_id=reaction.message_id,
+                is_manual=False
+            )
 
     elif had_heart_before and not has_heart_now:
         cursor.execute("DELETE FROM bookings WHERE chat_id = ? AND message_id = ?", (reaction.chat.id, reaction.message_id))
