@@ -190,7 +190,7 @@ user_keyboard = InlineKeyboardMarkup(inline_keyboard=[
 ])
 
 # =================================================================
-# ЯДРО БРОНЮВАННЯ (спільна функція для реакцій і мануального вводу)
+# ЯДРО БРОНЮВАННЯ
 # =================================================================
 async def process_booking(buyer_user_id, buyer_username, merch_id, chat_id, booking_message_id, comment_text, notify_message_id, is_manual=False, force=False):
     cursor.execute("SELECT character, price, is_auction, merch_type FROM merch WHERE id = ?", (merch_id,))
@@ -208,7 +208,6 @@ async def process_booking(buyer_user_id, buyer_username, merch_id, chat_id, book
             final_price = int(bid_match.group(1))
             cursor.execute("SELECT id FROM bookings WHERE merch_id = ?", (merch_id,))
             
-            # Якщо це аукціон і ми його форсуємо - просто перезаписуємо переможця, інакше блокуємо
             if cursor.fetchone() and not force:
                 print(f"[ЛОГ] УВАГА: Аукціон №{merch_id} вже завершено. Повторна ставка від {buyer_username} ігнорується.")
                 return
@@ -226,6 +225,32 @@ async def process_booking(buyer_user_id, buyer_username, merch_id, chat_id, book
         else:
             print(f"[ЛОГ] УВАГА: Не вдалося знайти ставку в коментарі '{comment_text}' від {buyer_username}.")
         return 
+
+    # --- НОВА ЛОГІКА ДЛЯ ПРИМУСОВОЇ БРОНІ ---
+    if force:
+        custom_price = base_price
+        custom_name = comment_text.strip()
+        
+        # Шукаємо число в кінці рядка (наприклад "Тарталья 150", "Тарталья - 150 грн", або просто "150")
+        price_match = re.search(r'(?:^|[-–—\s]+)(\d+)\s*(?:грн|uah|грн\.|uah\.)?$', custom_name, re.IGNORECASE)
+        if price_match:
+            custom_price = int(price_match.group(1))
+            custom_name = custom_name[:price_match.start()].strip()
+            
+        if not custom_name:
+            custom_name = "Примусова бронь"
+
+        cursor.execute("INSERT INTO bookings (user_id, username, merch_id, chat_id, message_id, booked_character, booked_price) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                       (buyer_user_id, buyer_username, merch_id, chat_id, booking_message_id, custom_name, custom_price))
+        conn.commit()
+        
+        booked_str = f"{custom_name} ({custom_price} грн)"
+        print(f"[ЛОГ] ФІКСАЦІЯ ПРИМУСОВОЇ БРОНІ: {buyer_username} отримав: {booked_str}")
+        try:
+            await bot.send_message(chat_id, f"⚠️ ПРИМУСОВА БРОНЬ для {buyer_username} успішна: {booked_str}", reply_to_message_id=notify_message_id)
+        except Exception as e:
+            pass
+        return
 
     comment_lower = comment_text.lower()
     padded_comment = f" {re.sub(r'[,.\-/]', ' ', comment_lower)} "
@@ -325,8 +350,7 @@ async def process_booking(buyer_user_id, buyer_username, merch_id, chat_id, book
     for item in requested_items:
         current_bookings_count = already_booked.count(item["display_name"]) + already_booked.count(item["name"])
 
-        # ЗМІНЕНО: Якщо force=True, ми ігноруємо ліміт кількості і дозволяємо бронювати далі
-        if current_bookings_count < item["qty"] or force:
+        if current_bookings_count < item["qty"]:
             cursor.execute("INSERT INTO bookings (user_id, username, merch_id, chat_id, message_id, booked_character, booked_price) VALUES (?, ?, ?, ?, ?, ?, ?)",
                            (buyer_user_id, buyer_username, merch_id, chat_id, booking_message_id, item["display_name"], item["price"]))
 
@@ -353,18 +377,17 @@ async def process_booking(buyer_user_id, buyer_username, merch_id, chat_id, book
 
     if successfully_booked:
         print(f"[ЛОГ] ФІКСАЦІЯ: {buyer_username} отримав: {', '.join(successfully_booked)}")
-        if partial_booking and not force:
+        if partial_booking:
             booked_str = ", ".join(successfully_booked)
             try:
                 await bot.send_message(chat_id, f"{buyer_username}, зарахована бронь лише: {booked_str}", reply_to_message_id=notify_message_id)
             except Exception as e:
                 print(f"[Помилка відправки повідомлення] {e}")
         else:
-            if is_manual or force:
+            if is_manual:
                 booked_str = ", ".join(successfully_booked)
-                prefix = "⚠️ ПРИМУСОВА БРОНЬ" if force else "✅ Ручна бронь"
                 try:
-                    await bot.send_message(chat_id, f"{prefix} для {buyer_username} успішна: {booked_str}", reply_to_message_id=notify_message_id)
+                    await bot.send_message(chat_id, f"✅ Ручна бронь для {buyer_username} успішна: {booked_str}", reply_to_message_id=notify_message_id)
                 except:
                     pass
     else:
@@ -402,7 +425,6 @@ async def send_db_file(message: types.Message):
         else:
             await message.answer("❌ База даних ще порожня або файл не знайдено.")
 
-# ДОДАНО: Обробник для ПРИМУСОВОЇ броні (ігнорує ліміти)
 @dp.message(F.text, F.text.lower().startswith("примусово"), F.reply_to_message)
 async def force_booking_handler(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
@@ -780,7 +802,7 @@ async def import_receipt_command(message: types.Message):
                 item_name = clean_start
                 item_name = re.sub(r'^[-•]\s*', '', item_name)
                 item_name = re.sub(r'\(\d+\s*грн\)', '', item_name)
-                item_name = re.sub(r'\[Показати (коментар|бронь)\]', '', item_name, flags=re.IGNORECASE)
+                item_name = re.sub(r'\[Показати (коментар\vert{}бронь)\]', '', item_name, flags=re.IGNORECASE)
                 item_name = item_name.strip()
                 
                 cursor.execute("INSERT INTO bookings (user_id, username, merch_id, chat_id, message_id, booked_character, booked_price) VALUES (?, ?, ?, ?, ?, ?, ?)",
