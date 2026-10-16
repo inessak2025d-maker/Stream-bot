@@ -603,10 +603,13 @@ async def generate_invoices(callback: types.CallbackQuery):
         link = f"https://t.me/c/{chat_id_str[4:]}/{msg_id}" if chat_id_str.startswith("-100") else ""
         link_text = f" <a href='{link}'>[Показати коментар]</a>" if link else ""
         
+        # ЗМІНЕНО: Приховуємо "Архів Пʼятниці", щоб не було подвійних пробілів
+        m_prefix = f"{merch_type} " if merch_type and merch_type != "Архів Пʼятниці" else ""
+        
         if is_auction:
-            user_buckets[username]["items"].append(f"• {merch_type} ({booked_price} грн){link_text}")
+            user_buckets[username]["items"].append(f"• {m_prefix}({booked_price} грн){link_text}")
         else:
-            user_buckets[username]["items"].append(f"• {merch_type} {booked_char} ({booked_price} грн){link_text}")
+            user_buckets[username]["items"].append(f"• {m_prefix}{booked_char} ({booked_price} грн){link_text}")
             
         user_buckets[username]["total"] += booked_price
         
@@ -619,13 +622,10 @@ async def generate_invoices(callback: types.CallbackQuery):
         
     while len(full_text) > 4000:
         split_pos = full_text.rfind('\n', 0, 4000)
-        
-        if split_pos == -1: 
-            split_pos = 4000
+        if split_pos == -1: split_pos = 4000
             
         part_to_send = full_text[:split_pos]
         await callback.message.answer(part_to_send, parse_mode="HTML", disable_web_page_preview=True)
-        
         full_text = full_text[split_pos:].lstrip('\n')
         
     if full_text.strip():
@@ -670,30 +670,25 @@ async def get_my_invoice(callback: types.CallbackQuery):
         link = f"https://t.me/c/{chat_id_str[4:]}/{msg_id}" if chat_id_str.startswith("-100") else ""
         link_text = f" <a href='{link}'>[Показати коментар]</a>" if link else ""
         
+        # ЗМІНЕНО: Приховуємо "Архів Пʼятниці"
+        m_prefix = f"{merch_type} " if merch_type and merch_type != "Архів Пʼятниці" else ""
+        
         if is_auction:
-            items_string_list.append(f"• {merch_type} ({booked_price} грн){link_text}")
+            items_string_list.append(f"• {m_prefix}({booked_price} грн){link_text}")
         else:
-            items_string_list.append(f"• {merch_type} {booked_char} ({booked_price} грн){link_text}")
+            items_string_list.append(f"• {m_prefix}{booked_char} ({booked_price} грн){link_text}")
             
         total += booked_price
         
     items_str = "\n".join(items_string_list)
-    
-    receipt_msg = (
-        f"🧾 <b>ТВІЙ ПОТОЧНИЙ ЧЕК:</b>\n\n"
-        f"{items_str}\n\n"
-        f"<b>💰 Загалом до сплати:</b> {total} грн."
-    )
+    receipt_msg = f"🧾 <b>ТВІЙ ПОТОЧНИЙ ЧЕК:</b>\n\n{items_str}\n\n<b>💰 Загалом до сплати:</b> {total} грн."
     
     while len(receipt_msg) > 4000:
         split_pos = receipt_msg.rfind('\n', 0, 4000)
-        
-        if split_pos == -1: 
-            split_pos = 4000
+        if split_pos == -1: split_pos = 4000
             
         part_to_send = receipt_msg[:split_pos]
         await callback.message.answer(part_to_send, parse_mode="HTML", disable_web_page_preview=True)
-        
         receipt_msg = receipt_msg[split_pos:].lstrip('\n')
         
     if receipt_msg.strip():
@@ -711,7 +706,8 @@ async def import_receipt_command(message: types.Message):
         await message.reply("❌ Встав текст чеку після команди.")
         return
 
-    cursor.execute("INSERT INTO merch (game, merch_type, character, price) VALUES ('Архів', 'Архів Пʼятниці', 'Різне', 0)")
+    # ЗМІНЕНО: Замість 'Архів Пʼятниці' тепер просто порожній рядок ''
+    cursor.execute("INSERT INTO merch (game, merch_type, character, price) VALUES ('Архів', '', 'Різне', 0)")
     dummy_merch_id = cursor.lastrowid
 
     blocks = re.split(r'(?=@[\w\d_]+)', html_text)
@@ -750,7 +746,7 @@ async def import_receipt_command(message: types.Message):
                 item_name = clean_start
                 item_name = re.sub(r'^[-•]\s*', '', item_name)
                 item_name = re.sub(r'\(\d+\s*грн\)', '', item_name)
-                item_name = re.sub(r'\[Показати (коментар\vert{}бронь)\]', '', item_name, flags=re.IGNORECASE)
+                item_name = re.sub(r'\[Показати (коментар|бронь)\]', '', item_name, flags=re.IGNORECASE)
                 item_name = item_name.strip()
                 
                 cursor.execute("INSERT INTO bookings (user_id, username, merch_id, chat_id, message_id, booked_character, booked_price) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -797,8 +793,8 @@ async def check_user_bookings(message: types.Message):
     if not target_username.startswith("@"):
         target_username = "@" + target_username
 
-    # Шукаємо всі броні цього юзера разом із їхніми унікальними ID у базі
-    cursor.execute('''SELECT b.id, m.merch_type, b.booked_character, b.booked_price 
+    # ЗМІНЕНО: Додано chat_id та message_id для формування посилання
+    cursor.execute('''SELECT b.id, m.merch_type, b.booked_character, b.booked_price, b.chat_id, b.message_id 
                       FROM bookings b JOIN merch m ON b.merch_id = m.id 
                       WHERE b.username = ? OR b.username = ?''', (target_username, target_username.lstrip('@')))
     user_bookings = cursor.fetchall()
@@ -808,25 +804,29 @@ async def check_user_bookings(message: types.Message):
         return
 
     lines = [f"👤 <b>Броні {target_username}:</b>\n"]
-    for b_id, m_type, b_char, b_price in user_bookings:
-        # Формуємо клікабельну команду для видалення кожної конкретної броні
-        lines.append(f"• {m_type} {b_char} ({b_price} грн) ➡️ /rm_{b_id}")
+    for b_id, m_type, b_char, b_price, chat_id, msg_id in user_bookings:
+        
+        # ЗМІНЕНО: Створюємо лінку [Бронь]
+        chat_id_str = str(chat_id)
+        link = f"https://t.me/c/{chat_id_str[4:]}/{msg_id}" if chat_id_str.startswith("-100") else ""
+        link_text = f" <a href='{link}'>[Бронь]</a>" if link else ""
+        
+        m_prefix = f"{m_type} " if m_type and m_type != "Архів Пʼятниці" else ""
+        lines.append(f"• {m_prefix}{b_char} ({b_price} грн){link_text} ➡️ /rm_{b_id}")
 
     full_text = "\n".join(lines)
     
-    # Нарізаємо повідомлення, якщо воно занадто довге (ліміт Телеграму)
     while len(full_text) > 4000:
         split_pos = full_text.rfind('\n', 0, 4000)
-        if split_pos == -1: 
-            split_pos = 4000
+        if split_pos == -1: split_pos = 4000
             
         part_to_send = full_text[:split_pos]
-        await message.answer(part_to_send, parse_mode="HTML")
-        
+        # ЗМІНЕНО: Вимикаємо прев'ю посилань, щоб чат не спамило картинками
+        await message.answer(part_to_send, parse_mode="HTML", disable_web_page_preview=True)
         full_text = full_text[split_pos:].lstrip('\n')
         
     if full_text.strip():
-        await message.answer(full_text, parse_mode="HTML")
+        await message.answer(full_text, parse_mode="HTML", disable_web_page_preview=True)
 
 
 # ДОДАНО: Точкове видалення конкретної броні за її ID
