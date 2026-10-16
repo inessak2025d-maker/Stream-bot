@@ -753,6 +753,62 @@ async def cancel_clear(callback: types.CallbackQuery):
     if callback.from_user.id in ADMIN_IDS:
         await callback.message.edit_text("❌ Очищення скасовано.")
 
+# ДОДАНО: Перевірка броней конкретного користувача для точкового видалення
+@dp.message(F.text.startswith("/check ") & (F.from_user.id.in_(ADMIN_IDS)))
+async def check_user_bookings(message: types.Message):
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        await message.reply("❌ Вкажіть юзернейм: /check @username")
+        return
+        
+    target_username = parts[1].strip()
+    if not target_username.startswith("@"):
+        target_username = "@" + target_username
+
+    # Шукаємо всі броні цього юзера разом із їхніми унікальними ID у базі
+    cursor.execute('''SELECT b.id, m.merch_type, b.booked_character, b.booked_price 
+                      FROM bookings b JOIN merch m ON b.merch_id = m.id 
+                      WHERE b.username = ? OR b.username = ?''', (target_username, target_username.lstrip('@')))
+    user_bookings = cursor.fetchall()
+
+    if not user_bookings:
+        await message.reply(f"У {target_username} немає жодної зафіксованої броні.")
+        return
+
+    lines = [f"👤 <b>Броні {target_username}:</b>\n"]
+    for b_id, m_type, b_char, b_price in user_bookings:
+        # Формуємо клікабельну команду для видалення кожної конкретної броні
+        lines.append(f"• {m_type} {b_char} ({b_price} грн) ➡️ /rm_{b_id}")
+
+    await message.reply("\n".join(lines), parse_mode="HTML")
+
+
+# ДОДАНО: Точкове видалення конкретної броні за її ID
+@dp.message(F.text.regexp(r"^/rm_(\d+)$") & (F.from_user.id.in_(ADMIN_IDS)))
+async def remove_booking_by_id(message: types.Message):
+    # Витягуємо цифру (ID) з команди
+    match = re.match(r"^/rm_(\d+)$", message.text)
+    if not match: return
+    booking_id = int(match.group(1))
+
+    # Спочатку дізнаємося, що саме ми видаляємо, щоб написати гарний звіт
+    cursor.execute('''SELECT b.username, m.merch_type, b.booked_character 
+                      FROM bookings b JOIN merch m ON b.merch_id = m.id 
+                      WHERE b.id = ?''', (booking_id,))
+    row = cursor.fetchone()
+
+    if not row:
+        await message.reply("❌ Бронь з таким ID не знайдено. Можливо, ви її вже видалили.")
+        return
+
+    username, m_type, b_char = row
+    
+    # Видаляємо рівно один рядок з бази даних
+    cursor.execute("DELETE FROM bookings WHERE id = ?", (booking_id,))
+    conn.commit()
+
+    await message.reply(f"🗑 <b>Точково видалено:</b>\nКористувач: {username}\nЛот: {m_type} {b_char}", parse_mode="HTML")
+
 async def main():
     print("Готуємось до осіннього стріму! Бот запущений")
     await dp.start_polling(bot, allowed_updates=["message", "callback_query", "message_reaction", "edited_message"])
