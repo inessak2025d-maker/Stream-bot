@@ -439,6 +439,38 @@ async def manual_booking_handler(message: types.Message):
     else:
         await message.reply("❌ Не вдалося знайти лот. Переконайтеся, що відповідаєте на пост з мерчем або на коментар під ним.")
 
+# ДОДАНО: Коротка команда "+" (аналог сердечка) через відповідь на коментар
+@dp.message(F.text == "+" & F.reply_to_message)
+async def quick_plus_booking(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+
+    buyer_msg = message.reply_to_message
+    buyer_user_id = buyer_msg.from_user.id
+    buyer_username = f"@{buyer_msg.from_user.username}" if buyer_msg.from_user.username else buyer_msg.from_user.full_name
+    comment_text = buyer_msg.text or buyer_msg.caption or ""
+
+    # Знаходимо, до якого лоту належить коментар покупця
+    cursor.execute("SELECT merch_id FROM chat_log WHERE message_id = ?", (buyer_msg.message_id,))
+    row = cursor.fetchone()
+
+    if row and row[0]:
+        merch_id = row[0]
+        
+        # Запускаємо стандартне ядро бронювання (як при сердечку)
+        await process_booking(
+            buyer_user_id=buyer_user_id,
+            buyer_username=buyer_username,
+            merch_id=merch_id,
+            chat_id=message.chat.id,
+            booking_message_id=buyer_msg.message_id,
+            comment_text=comment_text,
+            notify_message_id=message.message_id, # Бот відповість на твій плюс
+            is_manual=False
+        )
+    else:
+        await message.reply("❌ Не вдалося знайти лот для цього коментаря.")
+
 @dp.message(F.chat.type.in_({"group", "supergroup"}))
 async def handle_group_messages(message: types.Message):
     text = message.text or message.caption or ""
