@@ -715,10 +715,17 @@ async def on_shutdown(bot: Bot):
 @dp.callback_query(F.data == "my_invoice")
 async def get_my_invoice(callback: types.CallbackQuery):
     user_id = callback.from_user.id
+    username = f"@{callback.from_user.username}" if callback.from_user.username else ""
     
+    # ДОДАНО: "Самолікування" бази. Якщо є броні лише за юзернеймом (ручні/імпорт), прив'язуємо їх до реального ID
+    if username:
+        cursor.execute("UPDATE bookings SET user_id = ? WHERE username = ? AND (user_id = 0 OR user_id IS NULL)", (user_id, username))
+        conn.commit()
+        
+    # Тепер шукаємо броні і за ID, і за юзернеймом
     cursor.execute('''SELECT m.merch_type, b.booked_character, b.booked_price, b.chat_id, b.message_id, m.is_auction 
                       FROM bookings b JOIN merch m ON b.merch_id = m.id 
-                      WHERE b.user_id = ?''', (user_id,))
+                      WHERE b.user_id = ? OR b.username = ?''', (user_id, username))
     user_bookings = cursor.fetchall()
     
     if not user_bookings:
@@ -731,7 +738,7 @@ async def get_my_invoice(callback: types.CallbackQuery):
     for merch_type, booked_char, booked_price, chat_id, msg_id, is_auction in user_bookings:
         chat_id_str = str(chat_id)
         link = f"https://t.me/c/{chat_id_str[4:]}/{msg_id}" if chat_id_str.startswith("-100") else ""
-        link_text = f" <a href='{link}'>[Показати коментар]</a>" if link else ""
+        link_text = f" <a href='{link}'>[Бронь]</a>" if link else ""
         
         m_prefix = f"{merch_type} " if merch_type and merch_type != "Архів Пʼятниці" else ""
         
